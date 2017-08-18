@@ -1,0 +1,429 @@
+def ENVIRONMENT;
+def BYPASS_UNITTEST_SONAR;
+def BYPASS_UPLOAD_ARTIFACTORY;
+def BYPASS_DEPLOYMENT;
+def BYPASS_EMAIL_NOTIFICATION;
+def SONAR_SOURCES;
+def SONAR_EXCLUSIONS;
+def SONAR_PROJECT_KEY;
+def SONAR_PROJECT_NAME;
+def SONAR_FILTER;
+def SONAR_BUILD_BREAKER;
+def COMBINED_SQL_LOCATION;
+def APPLICATION_URL;
+def INSIGHT_CI_PIPELINE_URL;
+def INSIGHT_DEV_DEPLOY_PIPELINE_URL;
+def RELEASE_START_DATE;
+def gitCredId 		= env.SSH_DEVOPSPIPELINE_CRED_ID
+def gitRepo 		= env.INSIGHT_GIT_URL
+def sonar_url 		= env.CODE_QUALITY_SONAR_PROD_URL +"/dashboard/index/"
+def artifactory_url 	= env.ARTIFACTORY_URL +env.ARTIFACTORY_WEB_URI + env.ARTIFACTORY_DEV_LOCATION
+def photondashboard 	= env.PHOTONDASHBOARD_URL
+def extentx_url 	= env.EXTENTX_URL
+def versionNumber
+def sqlLocation;
+def sqlFileName;
+
+//node ('linux') {
+node ('linux') {
+	try{
+	   git poll: false, credentialsId: gitCredId, url: gitRepo
+	   def branchprops 		= readProperties file: 'currentReleaseInfo/branchdetails.properties'
+	   env.CURRENT_RELEASE_BRANCH 	= branchprops.CURRENT_RELEASE_BRANCH;
+	   env.MAJOR_VER 		= branchprops.MAJOR_VER;
+	   env.MINOR_VER 		= branchprops.MINOR_VER;
+	   env.PATCH 			= branchprops.PATCH;
+	   env.emailTo 			= branchprops.EMAILTO_DEV;
+	   env.APP_PACKAGE_NAME = branchprops.MAIN_PROJECT;
+	   BYPASS_UNITTEST_SONAR 	= branchprops.BYPASS_UNITTEST_SONAR;
+	   BYPASS_UPLOAD_ARTIFACTORY 	= branchprops.BYPASS_UPLOAD_ARTIFACTORY;
+	   BYPASS_DEPLOYMENT 		= branchprops.BYPASS_DEPLOYMENT;
+	   BYPASS_EMAIL_NOTIFICATION 	= branchprops.BYPASS_EMAIL_NOTIFICATION;
+	   SONAR_SOURCES 		= branchprops.SONAR_SOURCES;
+	   SONAR_EXCLUSIONS		= branchprops.SONAR_EXCLUSIONS;
+	   SONAR_PROJECT_KEY 		= branchprops.SONAR_PROJECT_KEY;
+	   SONAR_PROJECT_NAME 		= branchprops.SONAR_PROJECT_KEY;
+	   SONAR_FILTER			= branchprops.SONAR_FILTER;
+	   ENVIRONMENT			= branchprops.ENVIRONMENT;
+	   COMBINED_SQL_LOCATION	= branchprops.COMBINED_SQL_LOCATION;
+	   APPLICATION_URL		= branchprops.APPLICATION_URL;
+	   SONAR_BUILD_BREAKER		= branchprops.SONAR_BUILD_BREAKER;
+	   INSIGHT_CI_PIPELINE_URL	= branchprops.INSIGHT_CI_PIPELINE_URL;
+	   INSIGHT_DEV_DEPLOY_PIPELINE_URL = branchprops.INSIGHT_DEV_DEPLOY_PIPELINE_URL;
+	   RELEASE_START_DATE		= branchprops.RELEASE_START_DATE;
+	}finally{
+		deleteDir();
+	}
+}
+
+//node ('winagent001') {
+node ('taw004') {
+//node ('COMM-PRD-WIN-AGENT01') {
+def stageArray = prepareStages();
+def failureStage = "Checkout";
+   try{
+	   bat "del *.zip /s /q"
+	   versionNumber	= env.MAJOR_VER +"."+ env.MINOR_VER +"."+ env.PATCH +"."+ env.BUILD_NUMBER;
+	   sqlLocation		= COMBINED_SQL_LOCATION;
+	   sqlFileName		= env.MAJOR_VER + env.MINOR_VER + env.PATCH + env.BUILD_NUMBER + "-combined.sql"
+	   sonar_url 		= sonar_url + SONAR_PROJECT_KEY
+
+    stage "Checkout"
+		env.CURRENT_STAGE = 'Checkout'
+		git poll: true, credentialsId: gitCredId, url: gitRepo, branch: env.CURRENT_RELEASE_BRANCH
+
+        stageArray.put('Checkout', 'Success');
+
+     		bat "git log --branches=${env.CURRENT_RELEASE_BRANCH} --pretty=format:\"%%cd \t\t %%cn    \t\t\t %%s\" --since=${RELEASE_START_DATE} --grep=UWIN > Release_Notes_temp.txt"
+def relNotesContent = readFile 'Release_Notes_temp.txt'
+def header = "--------------------------------------------------------------------------------------------------------------------------------------------------"
+header = header + "\n\t Date \t\t\t\t Committed By \t\t\t\t\t\t Task Description \n"
+header = header + "--------------------------------------------------------------------------------------------------------------------------------------------------\n"
+
+
+writeFile file:'Release_Notes.txt',text:header + relNotesContent
+
+
+	if(BYPASS_UNITTEST_SONAR ==null || BYPASS_UNITTEST_SONAR == 'false'){
+	   stage "Unit Test"
+	    env.CURRENT_STAGE = 'Unit Test'
+	   	failureStage = "Unit Test";
+		bat "${env.CMD_SONAR_SCANNER_MSBUILD_3} begin /k:${SONAR_PROJECT_KEY} /n:${SONAR_PROJECT_KEY} /v:${versionNumber} /d:sonar.cs.opencover.reportsPaths=results.xml /d:sonar.cs.nunit.reportsPaths=TestResult_v2.xml /d:sonar.host.url=${env.CODE_QUALITY_SONAR_PROD_URL} /d:sonar.buildbreaker.skip=${SONAR_BUILD_BREAKER} /d:sonar.login=${env.SONAR_LOGIN_ID} /d:sonar.sources=${SONAR_SOURCES} /d:sonar.exclusions=${SONAR_EXCLUSIONS}"
+		bat "\"C:\\Program Files (x86)\\MSBuild\\14.0\\Bin\\MSBuild.exe\" Insight.sln /P:Configuration=Release /p:Platform=\"Any CPU\" /p:ProductVersion=${versionNumber} /verbosity:quiet /clp:NoSummary;NoItemAndPropertyList;ErrorsOnly /nologo"
+		bat "\"C:\\jenkins_home\\apps\\OpenCover.4.6.519\\tools\\OpenCover.Console.exe\" -target:\"C:\\jenkins_home\\apps\\NUnit.Console-3.5.0\\nunit3-console.exe\" -targetargs:\"Insight.UnitTests\\bin\\Release\\Insight.UnitTests.dll\" -register:user -filter:${SONAR_FILTER}"
+		bat "C:\\jenkins_home\\apps\\NUnit.Console-3.5.0\\nunit3-console.exe Insight.UnitTests\\bin\\Release\\Insight.UnitTests.dll --result=TestResult_v2.xml;format=nunit2"
+		bat "${env.CMD_SONAR_SCANNER_MSBUILD_3} end /d:sonar.login=${env.SONAR_LOGIN_ID}"
+
+		stageArray.put('Unit Test', 'Success');
+
+		stage "Code Analysis"
+		env.CURRENT_STAGE = 'Code Analysis'
+	   	failureStage = "Code Analysis";
+		println "Code Analysis completed as "
+		stageArray.put('Code Analysis', 'Success');
+	}
+
+	   stage "Build Automation"
+	    env.CURRENT_STAGE = 'Build Automation'
+	   	failureStage = "Build Automation";
+		create_build(ENVIRONMENT,sqlLocation, sqlFileName,versionNumber);
+		stageArray.put('Build Automation', 'Success');
+
+	if(BYPASS_UPLOAD_ARTIFACTORY == null || BYPASS_UPLOAD_ARTIFACTORY == 'false'){
+	   stage "Build Management"
+	    env.CURRENT_STAGE = 'Build Management'
+	   	failureStage = "Build Management";
+		doBuildAndPackage(ENVIRONMENT, versionNumber);
+		stageArray.put('Build Management', 'Success');
+	}
+
+	if(BYPASS_DEPLOYMENT == null || BYPASS_DEPLOYMENT == 'false'){
+    	stage "Deployment"
+	      try{
+			env.CURRENT_STAGE = 'Deployment'
+	      	failureStage = "Deployment";
+			println "inside Deployment"
+	        println "-------------------Start DB Scripts Deployment-----------------------"
+
+	        def appPackageName 			= env.APP_PACKAGE_NAME + ".zip";
+	        //def artifactoryRoot 			= env.ARTIFACTORY_URL + env.ARTIFACTORY_DEV_LOCATION + versionNumber  + "/"
+		def artifactoryVirtualRepoPath 		= env.ARTIFACTORY_URL + env.ARTIFACTORY_PACKAGE_LOCATION + versionNumber  + "/"
+		def xlDeployFileLocationInArtifactory 	= artifactoryVirtualRepoPath + appPackageName
+		def dbPackageName  			= env.DB_PACKAGE_NAME + "-" + versionNumber + ".zip";
+		def xlDeployDBEnvironment 		= env.DEPLOY_DB_ENV_NAME;
+		def xlDeployDBScriptLocInArtifactory 	= artifactoryVirtualRepoPath + dbPackageName
+
+		println "--------start----------"
+
+	        println    appPackageName
+	        println    dbPackageName
+	        println    xlDeployDBEnvironment
+	        println    xlDeployFileLocationInArtifactory
+	        println    xlDeployDBScriptLocInArtifactory
+	        println	   versionNumber;
+
+	        println "--------end----------"
+
+	     	def deploymentStatus =	build job: 'commercial-it-casualty/UW-Insight-4613/deploy/dev-deploy',
+	    	      parameters: [[$class: 'StringParameterValue', name: 'appPackageName', value: appPackageName],
+	    		     	   [$class: 'StringParameterValue', name: 'dbPackageName', value: dbPackageName],
+	    		      	   [$class: 'StringParameterValue', name: 'appPackagePath', value: xlDeployFileLocationInArtifactory],
+	    		      	   [$class: 'StringParameterValue', name: 'dbPackagePath', value: xlDeployDBScriptLocInArtifactory],
+	    		     	   [$class: 'StringParameterValue', name: 'versionNumber', value: versionNumber]]
+			stageArray.put('Deployment', 'Success');
+	     }finally{// Cleanup after deployment, note it is acommon node for build and deployment
+	     	bat "del *.zip /s /q"
+	    }
+	}
+
+	def artifactory_virtual_repo_url = env.ARTIFACTORY_URL +env.ARTIFACTORY_WEB_URI + env.ARTIFACTORY_PACKAGE_LOCATION +versionNumber
+	if(BYPASS_EMAIL_NOTIFICATION == null || BYPASS_EMAIL_NOTIFICATION == 'false'){
+        this.sendEmailNotification('Success', 'was successful', versionNumber, false,env.emailTo,APPLICATION_URL, artifactory_virtual_repo_url, sonar_url, photondashboard,extentx_url,INSIGHT_CI_PIPELINE_URL,INSIGHT_DEV_DEPLOY_PIPELINE_URL,stageArray);
+
+	}
+	this.publishArtifactsToBuildScreen(manager,APPLICATION_URL,sonar_url,artifactory_virtual_repo_url,photondashboard,extentx_url)
+
+   } catch(err) {
+	stageArray.put(failureStage, 'Failure');
+	this.sendEmailNotification('Failure', 'failed', versionNumber, true ,env.emailTo,APPLICATION_URL,'',sonar_url,photondashboard,extentx_url,INSIGHT_CI_PIPELINE_URL,INSIGHT_DEV_DEPLOY_PIPELINE_URL,stageArray)
+
+	throw err
+  }finally{
+	bat "del ${env.SONARQUBE_TEMP_FILES}\\*NETFramework*.* /s /q"
+  	bat "rmdir UWInsight /s /q"
+	deleteDir();
+   }
+}
+
+def create_build (environment,sqlLocation, sqlFileName,versionNumber) {
+
+	def mainPage = readFile "UWInsight/app/components/main/main.html"
+        writeFile file:"UWInsight/app/components/main/main.html",text:mainPage.replaceAll("\\{\\{InsightVersionNum\\}\\}",versionNumber);
+
+	writeFile file:'CasaultyLab/dbo/Scripts/' +  env.CURRENT_RELEASE_BRANCH + '/combined/1-empty.sql', text:"--";
+
+	bat "\"C:\\Program Files (x86)\\MSBuild\\14.0\\Bin\\MSBuild.exe\" Insight.sln /p:AutoParameterizationWebConfigConnectionStrings=False /p:DeployOnBuild=True /p:Configuration=$environment /verbosity:quiet /clp:NoSummary;NoItemAndPropertyList;ErrorsOnly /nologo"
+   	bat "ScriptManager\\bin\\${environment}\\ScriptManager.exe ${sqlLocation} ${env.CURRENT_RELEASE_BRANCH} ${sqlFileName}"
+}
+
+def doBuildAndPackage(environment, versionNumber){
+    try{
+    	//def server =  Artifactory.server 'artifactory_devops_id'
+    	def server = Artifactory.newServer url: env.ARTIFACTORY_URL,username:env.ARTIFACTORY_UID , password:env.ARTIFACTORY_PWD
+
+    	def buildInfo = Artifactory.newBuildInfo()
+	buildInfo.env.capture = true
+	buildInfo.env.collect()
+
+	zip archive: false, dir: ['ScriptManager/obj/',environment].join(''), glob: '', zipFile: [ 'ScriptManager-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'ScriptManager-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	zip archive: false, dir: ['ScriptManager.ExecutionTest/obj/',environment].join(''), glob: '', zipFile: [ 'ScriptManager.ExecutionTest-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'ScriptManager.ExecutionTest-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	zip archive: false, dir: ['ScriptManager.IntegrationTests/obj/',environment].join(''), glob: '', zipFile: [ 'ScriptManager.IntegrationTests-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'ScriptManager.IntegrationTests-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	zip archive: false, dir: ['Insight.ComponentTests/obj/',environment].join(''), glob: '', zipFile: [ 'Insight.ComponentTests-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'Insight.ComponentTests-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	zip archive: false, dir: ['Insight.IntegrationTests/obj/',environment].join(''), glob: '', zipFile: [ 'Insight.IntegrationTests-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'Insight.IntegrationTests-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	zip archive: false, dir: ['Insight.UnitTests/obj/',environment].join(''), glob: '', zipFile: [ 'Insight.UnitTests-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'Insight.UnitTests-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	//zip archive: false, dir: ['UWInsight/obj/', environment, '/Package'].join(''), glob: '', zipFile: [ 'UWInsight-', versionNumber, '.zip' ].join('')
+	//doUploadToArtifactory([ 'UWInsight-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	archive ('TestResult.xml')
+
+	//handle failover scenario
+	bat "copy UWInsight\\obj\\${environment}\\Package\\PackageTmp\\Web.config Web.primarydb.config /Y"
+	doUploadToArtifactory( 'Web.primarydb.config',versionNumber,buildInfo,server)
+
+	bat "copy UWInsight\\obj\\${environment}\\Package\\PackageTmp\\Web.config Web.failoverdb.config /Y"
+	def failoverwebconfig = readFile "Web.failoverdb.config"
+
+	failoverwebconfig = failoverwebconfig.replaceAll('SQL_CONNECTION_DBSERVER','SQL_CONNECTION_FAILOVER_DBSERVER')
+
+    //failoverwebconfig = failoverwebconfig.substring(1)
+
+    writeFile file:"Web.failoverdb.config",text:failoverwebconfig;
+	doUploadToArtifactory( 'Web.failoverdb.config',versionNumber,buildInfo,server)
+
+	bat "del UWInsight.zip /s /q"
+	zip archive: false, dir: ['UWInsight/obj/', environment,'/Package/PackageTmp'].join(''), glob: '', zipFile: 'UWInsight.zip'
+	doUploadToArtifactory( 'UWInsight.zip',versionNumber,buildInfo,server)
+
+	zip archive: false, dir: 'CasaultyLab/dbo/Scripts/' +  env.CURRENT_RELEASE_BRANCH + '/combined', glob: '', zipFile: [ 'DBScript-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'DBScript-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+	zip archive: false, dir: 'MaintenanceModeToggle/bin/Release' , glob: '', zipFile: [ 'MaintenanceModeToggle-', versionNumber, '.zip' ].join('')
+	doUploadToArtifactory([ 'MaintenanceModeToggle-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+
+//	zip archive: false, dir: ['TestAccountManager/obj/', environment, '/Package'].join(''), glob: '', zipFile: [ 'TestAccountManager-', versionNumber, '.zip' ].join('')
+//	doUploadToArtifactory([ 'TestAccountManager-', versionNumber, '.zip' ].join(''),versionNumber,buildInfo,server)
+
+
+	archive('Release_Notes.txt')
+	doUploadToArtifactory( 'Release_Notes.txt',versionNumber,buildInfo,server)
+
+	server.publishBuildInfo(buildInfo)
+     } finally {
+		bat "del *.zip /s /q"
+	}
+}
+
+def doUploadToArtifactory(fileName,versionNumber,buildInfo,server){
+
+	def artifactoryTarget = '"' + env.ARTIFACTORY_DEV_LOCATION + versionNumber + '/' + fileName + '"'
+
+	def artifactoryPattern = '"' + fileName + '"'
+
+	def uploadSpec = """ {
+		"files" : [{
+			"pattern" : ${artifactoryPattern},
+			"target" :  ${artifactoryTarget}
+		}]
+	}"""
+
+	server.upload(uploadSpec, buildInfo)
+	println buildInfo.name
+	println buildInfo.number
+//	server.publishBuildInfo(buildInfo)
+}
+
+/*
+def sendEmailNotification(status,  buildVersion, attachBuildLog,emailTo, application_url, artifactory_url, sonar_url, photondashboard,extentx_url,pipeline_url,dev_deploy_url,failureStage) {
+	def jobName = "${env.JOB_NAME}"
+	def subjectJobName = "UW Insight - Dev Deployment"
+	if(status == 'Success'){
+		bodyContent =  '''Jobname : ''' + jobName +  ''' : ''' + status + '''   \n  Application URL : ''' + application_url + '''  \n sonarQube Dashboard :  ''' + sonar_url +'''   \n  Artifactory URL : ''' + artifactory_url +'''   \n  Photon Dashboard : ''' + photondashboard  +  '''  \n  ExtentX URL :  ''' + extentx_url  +  '''  \n  Dev-CI URL :  ''' + pipeline_url  +  '''  \n  Dev Deployment URL :  ''' + dev_deploy_url
+		mail bcc: '', body:bodyContent, cc: '', charset: 'UTF-8', from: 'jenkins@cloud.aig.com', mimeType: 'text/plain', replyTo: 'jenkins@cloud.aig.com', subject: subjectJobName +'  :  Build No : '+ buildVersion + ' : Status : ' + status, to: "$emailTo"
+	}else{
+		bodyContent =  '''Jobname : ''' + jobName +  ''' : ''' + status + '''   \n  Application URL : ''' + application_url + '''  \n sonarQube Dashboard :  ''' + sonar_url +'''   \n  Photon Dashboard : ''' + photondashboard  +  '''  \n  ExtentX URL :  ''' + extentx_url  +  '''  \n  Dev-CI URL :  ''' + pipeline_url +  '''  \n  Dev Deployment URL :  ''' + dev_deploy_url
+	    	emailext subject: subjectJobName +'  :  Build No : '+ buildVersion + ' : Status : ' + status + ' : Stage Failed : ' + failureStage , body: bodyContent, to: "$emailTo", from: 'jenkins@cloud.aig.com', replyTo: 'jenkins@cloud.aig.com', mimeType: 'text/html', attachLog: attachBuildLog
+	}
+}*/
+def publishArtifactsToBuildScreen(manager,application_url, sonar_url,artifactory_url,photondashboard,extentx_url){
+	manager.createSummary("green.gif").appendText("<h1>Insight Application Url : <a href=\"${application_url}\">UW Insight</a></h1>", false, false, false, "blue")
+	manager.createSummary("green.gif").appendText("<h1>Insight Code Quality Results : <a href=\"${sonar_url}\">Sonar Qube</a></h1>", false, false, false, "blue")
+    	manager.createSummary("green.gif").appendText("<h1>Photon Dashboard : <a href=\"${photondashboard}\">Insight Dashboard</a></h1>", false, false, false, "blue")
+     	manager.createSummary("green.gif").appendText("<h1>Artifactory Url : <a href=\"${artifactory_url}\">Insight Artifactories</a></h1>", false, false, false, "blue")
+     	manager.createSummary("green.gif").appendText("<h1>ExtentX Reports Url : <a href=\"${extentx_url}\">ExtentX Reports</a></h1>", false, false, false, "blue")
+}
+
+import java.text.SimpleDateFormat;
+def prepareStages(){
+	def dateFormat = new SimpleDateFormat("MM/dd/yyyy HH:mm:ss");
+	def start = new Date();
+	env.build_start = dateFormat.format(start);
+	def stageArray = [:]
+	stageArray.put('Checkout', 'Not started');
+	stageArray.put('Unit Test', 'Not started');
+	stageArray.put('Code Analysis', 'Not started');
+	stageArray.put('Build Automation', 'Not started');
+	stageArray.put('Build Management', 'Not started');
+	stageArray.put('Deployment', 'Not started');
+	return stageArray;
+}
+
+def sendEmailNotification(status, bodyMessage, buildVersion, attachBuildLog,emailTo, application_url, artifactory_url, sonar_url, photondashboard,extentx_url,pipeline_url,dev_deploy_url,stageArray) {
+    def jobName = "${env.JOB_NAME}"
+    def subjectJobName = "UW Insight - Dev Deployment  :  Build No : " + buildVersion + " : Status : " + status
+    def currentStage = "${env.CURRENT_STAGE}"
+    if(status == 'Success'){
+        def urlArray = [:]
+        urlArray.put('Photon Dashboard', photondashboard);
+        urlArray.put('View Application',application_url);
+        urlArray.put('SonarQube Dashboard', sonar_url);
+        urlArray.put('Artifacts', artifactory_url);
+        urlArray.put('ExtentX URL', extentx_url);
+        urlArray.put('CI Pipeline URL', pipeline_url);
+        urlArray.put('Deployment Pipeline URL', dev_deploy_url);
+
+        def generateEmailContent        = generateEmailContent(status, stageArray, urlArray);
+        env.confluenceAttachmentContent = generateEmailContent;
+        env.confluenceAttachmentFileName= 'Dev_Success_Deployment.html'
+
+    	emailext attachLog: attachBuildLog,attachmentsPattern:'sprint-release-notes.txt', body: generateEmailContent, subject: subjectJobName, to: emailTo
+    }else{
+        def urlArray = [:]
+        urlArray.put('Photon Dashboard', photondashboard);
+        urlArray.put('SonarQube Dashboard', sonar_url);
+        urlArray.put('CI Pipeline URL', pipeline_url);
+        urlArray.put('Deployment Pipeline URL', dev_deploy_url);
+ //       emailext attachLog: attachBuildLog, body: generateEmailContent(status, stageArray, urlArray), subject: subjectJobName +' : Stage Failed : ' + currentStage, to: emailTo
+   }
+}
+
+@NonCPS
+def generateEmailContent(status, stageArray, urlArray){
+    def changeUsers = changelist();
+    def icons = ["Monkey","Viper","Crane","Shifu","Mantis","Tigress","Oogway","Zing"];
+    def dateFormat = new SimpleDateFormat("MM/dd/yyyy HH:mm:ss");
+    def startDate = dateFormat.parse(env.build_start);
+    def endDate = new Date();
+    def tookTime = groovy.time.TimeCategory.minus(endDate,startDate).toString();
+    def randomN = randomNum();
+     def htmlContent = "";
+     htmlContent += "<!doctype html><html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\"><head><meta charset=\"UTF-8\"><meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
+     htmlContent += "<style>body{font-family:Arial;font-size:16px;}.hdcontent,.status a{font-size:16px;text-decoration: underline;}.status a,a img,img{text-decoration:none}.shell-body li,a{word-wrap:break-word}#bodyCell,#bodyTable,body{height:100%!important;margin:0;padding:0;width:100%!important}table{border-collapse:collapse}.hdcontent{width:60%;padding:10px}.status{height:100px;padding:10px 10px 0;border-radius:10px}.status a{color:#FFF}td{color:#FFF;}h3,h4{color:#E35F0B!important;letter-spacing:normal}.tabstyle{width:100px;height:20px;padding:10px;border-bottom:5px solid transparent;cursor:pointer}.tabstyle:hover{border-bottom:5px solid #fff}#templateBody,#templateFooter,#templateHeader{border-bottom:0}.circle-text{color:#707070;padding-left:25px}#outlook a,p{padding:0}#bodyCell,#templateBody,#templateHeader{background-color:#FFF;border-top:0}a img,img{border:0;outline:0}h1,h2,h3,h4,h5,h6{margin:0;padding:0}p{margin:1em 0}.ExternalClass,.ReadMsgBody{width:100%}.ExternalClass,.ExternalClass div,.ExternalClass font,.ExternalClass p,.ExternalClass span,.ExternalClass td{line-height:100%}h1,h2{line-height:125%;text-align:center;font-weight:700;font-style:normal}table,td{mso-table-lspace:0;mso-table-rspace:0}img{-ms-interpolation-mode:bicubic}a,blockquote,body,li,p,table,td{-ms-text-size-adjust:100%;-webkit-text-size-adjust:100%}a.devopsButton{display:block}.devopsImage{vertical-align:bottom}.devopsTextContent{word-break:break-word}.devopsTextContent img{height:auto!important}.devopsDividerBlock{table-layout:fixed!important}h1{color:#0bd0e2!important;font-size:30px;letter-spacing:-1px}h2{color:#202020!important;font-size:20px;letter-spacing:normal}h3,h4{line-height:125%;text-align:left;}h3{font-size:18px;font-style:normal;font-weight:700}h4{font-size:16px;font-style:normal;font-weight:400}#templatePreheader{background-color:#4caad8;border-top:0;border-bottom:0}.preheaderContainer .devopsTextContent,.preheaderContainer .devopsTextContent p{color:#202020;font-size:14px;line-height:125%;text-align:left}.preheaderContainer .devopsTextContent a{color:#202020;font-weight:400;text-decoration:underline}.headerContainer .devopsTextContent,.headerContainer .devopsTextContent p{color:#202020;font-size:15px;line-height:150%;text-align:center}.headerContainer .devopsTextContent a{color:#E35F0B;font-weight:400;text-decoration:underline},.bodyContainer .devopsTextContent,.bodyContainer .devopsTextContent p{color:#202020;font-size:15px;line-height:150%;text-align:left}.bodyContainer .devopsTextContent a{color:#E35F0B;font-weight:400;text-decoration:underline}#templateFooter{border-top:0}.footerContainer .devopsTextContent,.footerContainer .devopsTextContent p{color:#202020;font-size:16px;line-height:125%;text-align:center}.footerContainer .devopsTextContent a{color:#202020;font-weight:400;text-decoration:underline}@media only screen and (max-width:480px){a,blockquote,body,li,p,table,td{-webkit-text-size-adjust:none!important}body{width:100%!important;min-width:100%!important}#bodyCell{padding-top:10px!important}.templateContainer{max-width:600px!important;width:100%!important}.devopsImage{height:auto!important;width:100%!important}.devopsBoxedTextContentContainer,.devopsCaptionBottomContent,.devopsCaptionLeftImageContentContainer,.devopsCaptionLeftTextContentContainer,.devopsCaptionRightImageContentContainer,.devopsCaptionRightTextContentContainer,.devopsCaptionTopContent,.devopsCartContainer,.devopsImageCardLeftTextContentContainer,.devopsImageCardRightTextContentContainer,.devopsImageGroupContentContainer,.devopsRecContentContainer,.devopsTextContentContainer{max-width:100%!important;width:100%!important}.devopsBoxedTextContentContainer{min-width:100%!important}.devopsImageGroupContent{padding:9px!important}.devopsCaptionLeftContentOuter .devopsTextContent,.devopsCaptionRightContentOuter .devopsTextContent{padding-top:9px!important}.devopsCaptionBlockInner .devopsCaptionTopContent:last-child .devopsTextContent,.devopsImageCardTopImageContent{padding-top:18px!important}.devopsImageCardBottomImageContent{padding-bottom:9px!important}.devopsImageGroupBlockInner{padding-top:0!important;padding-bottom:0!important}.devopsImageGroupBlockOuter{padding-top:9px!important;padding-bottom:9px!important}.devopsBoxedTextContentColumn,.devopsTextContent{padding-right:18px!important;padding-left:18px!important}.devopsImageCardLeftImageContent,.devopsImageCardRightImageContent{padding-right:18px!important;padding-bottom:0!important;padding-left:18px!important}.mcpreview-image-uploader{display:none!important;width:100%!important}h1{font-size:24px!important;line-height:125%!important}h2{font-size:20px!important;line-height:125%!important}.devopsBoxedTextContentContainer .devopsTextContent,.devopsBoxedTextContentContainer .devopsTextContent p,h3{font-size:18px!important;line-height:125%!important}h4{font-size:16px!important;line-height:125%!important}#templatePreheader{display:block!important}.preheaderContainer .devopsTextContent,.preheaderContainer .devopsTextContent p{font-size:14px!important;line-height:115%!important}.bodyContainer .devopsTextContent,.bodyContainer .devopsTextContent p,.headerContainer .devopsTextContent,.headerContainer .devopsTextContent p{font-size:18px!important;line-height:125%!important}.footerContainer .devopsTextContent,.footerContainer .devopsTextContent p{font-size:14px!important;line-height:115%!important}}.shell-wrap{width:90%;margin:0 auto;box-shadow:0 0 30px rgba(0,0,0,.4);-webkit-border-radius:3px;-moz-border-radius:3px;border-radius:3px;float:left}.shell-body{margin:0;padding:5px;list-style:none;background:#141414;color:#45D40C;font:.8em 'Andale Mono',Consolas,'Courier New';line-height:1.6em;-webkit-border-bottom-right-radius:3px;-webkit-border-bottom-left-radius:3px;-moz-border-radius-bottomright:3px;-moz-border-radius-bottomleft:3px;border-bottom-right-radius:3px;border-bottom-left-radius:3px}.shell-body li{position:relative;padding:0 0 0 15px}</style>";
+     htmlContent += "</head><body leftmargin=\"0\" marginwidth=\"0\" topmargin=\"0\" marginheight=\"0\" offset=\"0\"><center><table align=\"center\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\" height=\"100%\" width=\"100%\" id=\"bodyTable\"><tr><td align=\"center\" valign=\"top\" id=\"bodyCell\">";
+     htmlContent += "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\"><tr><td align=\"center\" valign=\"top\"><table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" id=\"templateHeader\"><tr> <td align=\"center\" valign=\"top\"> <table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"80%\" class=\"templateContainer\"><tr><td valign=\"top\" class=\"headerContainer\" style=\"padding-top:10px; padding-bottom:10px;\"><table class=\"devopsImageBlock\" style=\"min-width:100%;\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" border=\"0\"><tbody class=\"devopsImageBlockOuter\"><tr><td class=\"devopsImageContent\" style=\"padding-right: 9px; padding-left: 9px; padding-top: 0; padding-bottom: 0; text-align:center;\" valign=\"top\">";
+    htmlContent += "<!-- Image check -->";
+    if (status == 'Failure') {
+      htmlContent += "<img alt=\"\" src=\"https://s3.amazonaws.com/devops-lite/KFP/Panda/sad.png\" style=\"max-width:200px; padding-bottom: 0; display: inline !important; vertical-align: bottom;\" class=\"devopsImage\" width=\"200\" align=\"middle\">";
+    }else{
+      htmlContent += "<img alt=\"\" src=\"https://s3.amazonaws.com/devops-lite/KFP/Panda/happy${randomN}.png\" style=\"max-width:200px; padding-bottom: 0; display: inline !important; vertical-align: bottom;\" class=\"devopsImage\" width=\"200\" align=\"middle\">";
+    }
+    htmlContent += "</td></tr></tbody></table></td></tr></table></td></tr></table></td></tr><tr><td align=\"center\" valign=\"top\"><table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" id=\"templateHeader\"><tr> <td align=\"center\" valign=\"top\"> <table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"90%\" class=\"templateContainer\"><tr><td valign=\"top\" class=\"headerContainer\" style=\"padding-top:10px; padding-bottom:10px;\">";
+    htmlContent += "<!-- Table color -->";
+    if (status == 'Failure') {
+      htmlContent += "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" align=\"center\" class=\"status\" style=\"background-color:#F00\" id=\"status\">";
+    }else{
+      htmlContent += "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" align=\"center\" class=\"status\" style=\"background-color:#0C6\" id=\"status\">";
+    }
+    htmlContent += "<tr><td class=\"hdcontent\"><table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" align=\"left\"><tr>";
+    htmlContent += "<td colspan=\"3\">${env.JOB_NAME}</td></tr><tr><td>Changes by</td><td>:</td>";
+    htmlContent += "<td>${changeUsers}</td></tr></table></td><td class=\"hdright\"><table border=\"0\" cellpadding=\"5px\" cellspacing=\"0\" align=\"right\"><tr><td><img src=\"https://s3.amazonaws.com/devops-lite/clock_1.png\" width=\"20px\" height=\"20px\" /></td>";
+    htmlContent += "<td>${tookTime}</td></tr><tr><td><img src=\"https://s3.amazonaws.com/devops-lite/Clock_2.png\" width=\"20px\" height=\"20px\" /></td>";
+    htmlContent += "<td>${env.build_start}</td></tr></table></td></tr><tr><td colspan=\"3\"><table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" align=\"left\"><tr>";
+    for (it2 in mapToList(urlArray)) {
+        key = it2[0]
+        value = it2[1]
+        htmlContent += "<td class=\"tabstyle\"><a href=\""+value+"\">"+key+"</a></td>";
+    }
+    htmlContent += "</tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr>";
+    def pipelinehtml = "<tr><td align=\"center\" valign=\"top\"><table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" id=\"templateHeader\"><tr> <td align=\"center\" valign=\"top\"> <table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"80%\" class=\"templateContainer\"><tr><td valign=\"top\" class=\"headerContainer\" style=\"padding-top:10px; padding-bottom:10px;\"><table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"80%\" align=\"center\"><tr>";
+        def counter = 0;
+        for (it2 in mapToList(stageArray)) {
+            key = it2[0]
+            value = it2[1]
+            def color = "grey";
+            if(value == "Success")
+                color = "green";
+            else if(value == 'Failure')
+                color = 'red';
+            pipelinehtml += "<td align=\"center\"><div class=\"circle\"><img src=\"https://s3.amazonaws.com/devops-lite/KFP/${icons[counter % icons.size()]}/${color}.png\"/></div><div class=\"circle-text\">${key}</div></td>";
+            if (counter != stageArray.size() - 1)
+                pipelinehtml += "<td width=\"75px\" align=\"center\"><img src=\"https://s3.amazonaws.com/devops-lite/cline.png\"/></td>";
+            counter++;
+        }
+    pipelinehtml += "</tr></table></td></tr></table></td></tr></table></td></tr>";
+    htmlContent += pipelinehtml;
+    htmlContent += "<tr> <td> <table class=\"templateContainer\" border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"> <tbody> <tr> <td align=\"center\" valign=\"bottom\"><img class=\"devopsImage\" width=\"600\" height=\"100\" style=\"display:block;\" src=\"https://s3.amazonaws.com/devops-lite/KFP/goldenfields_top.png\"></td></tr></tbody> </table> </td></tr><tr bgcolor=\"#FDB813\"> <td align=\"center\" valign=\"top\" style=\"padding-bottom:10px;\"> <table id=\"templateFooter\" border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"> <tbody> <tr> <td align=\"center\" valign=\"top\"> <table class=\"templateContainer\" border=\"0\" width=\"600\" cellspacing=\"0\" cellpadding=\"0\"> <tbody> <tr> <td align=\"center\" valign=\"top\"><img class=\"devopsImage\" width=\"600\" height=\"40\" style=\"display:block;\" src=\"https://s3.amazonaws.com/devops-lite/KFP/goldenfields_bottom.png\"></td></tr></tbody> </table> </td></tr><tr><td align=\"right\" style=\"padding-right:15px;\" valign=\"middle\" height=\"80px\"><img src=\"https://s3.amazonaws.com/devops-lite/devops-logo.png\" style=\"-moz-border-top-colors: none; -moz-border-right-colors: none; -moz-border-bottom-colors: none; -moz-border-left-colors: none; border-image: none; width: 52px; height: 60px; margin: 0px;vertical-align:middle;\" height=\"60\" width=\"52\"></td></tr></tbody> </table> </td></tr>";
+     htmlContent += "</table></td></tr></table></center></body></html>";
+     return htmlContent;
+}
+
+
+@NonCPS
+def mapToList(depmap) {
+    def dlist = []
+    for (entry in depmap) {
+        dlist.add([entry.key, entry.value])
+    }
+    dlist
+}
+
+import java.util.Random
+@NonCPS
+def randomNum(){
+Random rand = new Random()
+int max = 3
+return rand.nextInt(max+1)
+}
+
+@NonCPS
+def changelist() {
+    def changes = [] as Set
+    currentBuild.changeSets.each { set ->
+        set.each { entry ->
+            changes.add("${entry.author.fullName}")
+        }
+    }
+    return changes.join(", ")
+}
